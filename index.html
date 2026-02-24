@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>一問一答タイマー</title>
+<style>
+:root{--bg:#0b1220;--card:#0f1b33;--txt:#e8eefc;--muted:#9fb0d0;--accent:#77b8ff;--warn:#ffd27a;}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:grid;place-items:center;font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans JP",sans-serif;
+  background:radial-gradient(900px 500px at 20% 10%,#192a55,var(--bg));color:var(--txt);user-select:none;-webkit-tap-highlight-color:transparent;}
+.card{width:min(720px,94vw);background:color-mix(in srgb,var(--card) 90%,black);border:1px solid rgba(255,255,255,.1);
+  border-radius:22px;padding:20px;box-shadow:0 22px 70px rgba(0,0,0,.45);}
+header{display:flex;justify-content:space-between;flex-wrap:wrap;gap:12px;align-items:flex-start}
+h1{margin:0;font-size:16px;color:var(--muted)}
+.pills{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.pill{border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.05);border-radius:999px;padding:8px 10px;font-size:12px;color:var(--muted)}
+.pill strong{color:var(--txt);font-weight:700}
+.stage{margin-top:16px;border-radius:18px;border:1px solid rgba(255,255,255,.1);background:rgba(255,255,255,.03);
+  padding:18px;min-height:320px;display:grid;place-items:center;text-align:center;cursor:pointer;}
+.time{font-size:84px;font-weight:850;margin:10px 0;font-variant-numeric:tabular-nums;letter-spacing:.02em}
+.sub{color:var(--muted);font-size:14px;line-height:1.6}
+.controls{display:flex;gap:10px;justify-content:center;margin-top:10px;flex-wrap:wrap}
+button{border:1px solid rgba(255,255,255,.2);background:rgba(255,255,255,.05);color:var(--txt);padding:9px 12px;border-radius:10px;cursor:pointer}
+button.primary{background:color-mix(in srgb,var(--accent) 22%,rgba(255,255,255,.05));border-color:rgba(119,184,255,.38)}
+button:disabled{opacity:.55;cursor:not-allowed}
+.counter{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+input[type="number"]{width:90px;padding:7px 8px;border-radius:10px;border:1px solid rgba(255,255,255,.18);background:#0b1020;color:var(--txt)}
+.toggle{display:flex;align-items:center;gap:8px}
+.toggle input{transform:scale(1.1)}
+.small{margin-top:8px;color:var(--muted);font-size:12px;line-height:1.7;text-align:center}
+</style>
+</head>
+<body>
+<div class="card">
+  <header>
+    <div>
+      <h1>一問一答タイマー（35秒 ↔ 25秒）</h1>
+      <div class="pills" style="margin-top:10px">
+        <div class="pill">現在：<strong id="phaseName">第1タイマー（35秒）</strong></div>
+        <div class="pill">状態：<strong id="state">停止中</strong></div>
+        <div class="pill">
+          <span class="toggle">
+            <input id="autoMode" type="checkbox">
+            <label for="autoMode">0秒で自動移行</label>
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <div class="counter">
+      <div class="pill">全体カウント：<strong id="round">0</strong></div>
+      <button id="minus">−</button>
+      <input type="number" id="roundInput" min="0" value="0">
+      <button id="plus">＋</button>
+    </div>
+  </header>
+
+  <div class="stage" id="stage" aria-label="タップ領域">
+    <div>
+      <div class="time" id="time">35</div>
+      <div class="sub" id="hint">
+        画面タップで次へ（切替音→自動開始）。<br>
+        0秒到達で通知音。自動移行ONなら0秒で次へ進みますわ。
+      </div>
+    </div>
+  </div>
+
+  <div class="controls">
+    <button class="primary" id="start">開始</button>
+    <button id="pause" disabled>停止</button>
+    <button id="reset">リセット</button>
+  </div>
+
+  <div class="small">
+    ※ 途中タップはいつでも強制切替ですわ。<br>
+    ※ 全体カウントは「第1→第2」を通過し「第2→第1」へ戻った時に +1 です。
+  </div>
+</div>
+
+<script>
+(() => {
+  const DURATIONS = [35, 25];
+  const NAMES = ["第1タイマー（35秒）", "第2タイマー（25秒）"];
+
+  let index = 0;
+  let remaining = DURATIONS[0];
+  let running = false;
+  let timerId = null;
+  let lastTick = null;
+
+  let roundCount = 0;
+  let completedFirst = false;
+
+  // --- Auto transition mode ---
+  const elAuto = document.getElementById("autoMode");
+  let autoTransition = false;
+
+  // --- UI elements ---
+  const elTime = document.getElementById("time");
+  const elPhase = document.getElementById("phaseName");
+  const elState = document.getElementById("state");
+  const elHint  = document.getElementById("hint");
+  const elRound = document.getElementById("round");
+  const elRoundInput = document.getElementById("roundInput");
+  const btnStart = document.getElementById("start");
+  const btnPause = document.getElementById("pause");
+
+  // --- Audio (single context) ---
+  let audioCtx = null;
+  function ensureAudio() {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+  }
+  function beep(kind = "done") {
+    ensureAudio();
+    if (!audioCtx) return;
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.type = "sine";
+    o.frequency.value = (kind === "switch") ? 660 : 880; // switch低め / done高め
+    g.gain.value = 0.07;
+    o.connect(g); g.connect(audioCtx.destination);
+    o.start();
+    setTimeout(() => o.stop(), (kind === "switch") ? 140 : 260);
+  }
+
+  function updateUI() {
+    elTime.textContent = String(Math.max(0, remaining)).padStart(2, "0");
+    elPhase.textContent = NAMES[index];
+    elState.textContent = running ? "実行中" : "停止中";
+
+    btnStart.disabled = running;
+    btnPause.disabled = !running;
+
+    elRound.textContent = String(roundCount);
+    elRoundInput.value = String(roundCount);
+
+    elAuto.checked = autoTransition;
+
+    elHint.innerHTML =
+      `画面タップで次へ（切替音→自動開始）。<br>` +
+      `0秒到達で通知音。自動移行は <strong>${autoTransition ? "ON" : "OFF"}</strong> ですわ。`;
+
+    document.title = `${remaining}｜${NAMES[index]}`;
+  }
+
+  function stop() {
+    if (timerId) clearInterval(timerId);
+    timerId = null;
+    running = false;
+    lastTick = null;
+    updateUI();
+  }
+
+  function start() {
+    if (running) return;
+    if (remaining <= 0) return;
+
+    ensureAudio();
+    running = true;
+    lastTick = performance.now();
+    updateUI();
+
+    timerId = setInterval(() => {
+      const now = performance.now();
+      const diff = Math.floor((now - lastTick) / 1000);
+      if (diff <= 0) return;
+
+      remaining -= diff;
+      lastTick += diff * 1000;
+
+      if (remaining <= 0) {
+        remaining = 0;
+
+        // 0秒到達音
+        beep("done");
+
+        // まず停止（自動移行ONでも、ここで一旦タイマーは切る）
+        stop();
+
+        // 自動移行ONなら、短い間を置いて次フェーズへ
+        if (autoTransition) {
+          // 連打/多重実行を防ぐ：この時点ではrunning=false, timerId=null
+          setTimeout(() => {
+            // ここでユーザーがタップしても nextPhase が走るが、stop()は冪等なので問題なし
+            nextPhaseInternal({ fromAuto: true });
+          }, 350);
+        }
+      } else {
+        updateUI();
+      }
+    }, 250);
+  }
+
+  // 第1→第2 / 第2→第1 の通過判定 + 切替
+  function markPassAndSwitch() {
+    if (index === 0) {
+      completedFirst = true;
+      index = 1;
+    } else {
+      index = 0;
+      if (completedFirst) roundCount += 1;
+      completedFirst = false;
+    }
+    remaining = DURATIONS[index];
+  }
+
+  // 内部用（タップ or 自動移行のどちらからでも呼べる）
+  function nextPhaseInternal({ fromAuto }) {
+    ensureAudio();
+    stop();
+    markPassAndSwitch();
+
+    // 切替音：タップでも自動移行でも鳴らす
+    beep("switch");
+
+    updateUI();
+    start(); // 次フェーズは自動開始
+
+    // 参考：自動移行のときだけ表示を変えたい場合はこちらで分岐できますわ
+    // if (fromAuto) { ... }
+  }
+
+  function nextPhaseByTap() {
+    nextPhaseInternal({ fromAuto: false });
+  }
+
+  // --- Events ---
+  document.getElementById("stage").addEventListener("click", () => nextPhaseByTap());
+  document.getElementById("start").addEventListener("click", () => start());
+  document.getElementById("pause").addEventListener("click", () => stop());
+  document.getElementById("reset").addEventListener("click", () => {
+    stop();
+    remaining = DURATIONS[index];
+    updateUI();
+  });
+
+  document.getElementById("plus").addEventListener("click", () => { roundCount += 1; updateUI(); });
+  document.getElementById("minus").addEventListener("click", () => { roundCount = Math.max(0, roundCount - 1); updateUI(); });
+  elRoundInput.addEventListener("change", () => {
+    const v = parseInt(elRoundInput.value, 10);
+    roundCount = Number.isFinite(v) ? Math.max(0, v) : 0;
+    updateUI();
+  });
+
+  elAuto.addEventListener("change", () => {
+    autoTransition = !!elAuto.checked;
+    ensureAudio(); // トグル操作もユーザー操作なので音の準備に使える
+    updateUI();
+  });
+
+  updateUI();
+})();
+</script>
+</body>
+</html>
